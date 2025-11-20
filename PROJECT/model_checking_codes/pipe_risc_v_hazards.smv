@@ -1,0 +1,216 @@
+-- ============================================================================
+-- NuXMV model for Pipelined RISC-V Hazard / Stall / Flush Logic
+-- Abstracted from:
+--   - pipe_risc_v.v
+--   - hazard_unit.v
+--   - pipeline register behavior (reg_fd, reg_de)
+--
+-- Focus:
+--   - stall_f, stall_d
+--   - flush_d, flush_e
+--   - pcsrc_e (branch/jump taken)
+--   - load-use hazard detection (resultsrc_e0, rs1_d, rs2_d, rd_e)
+--   - PC and FD-register stability under stall/flush
+--
+-- All data values and register indices are abstracted to small domains
+-- sufficient to express equalities and "non-zero" (x0 vs non-x0).
+-- ============================================================================
+
+MODULE main
+
+VAR
+  -- Register indices (abstracted to 0..3; 0 represents x0)
+  rs1_d : 0..3;    -- source register 1 in Decode stage
+  rs2_d : 0..3;    -- source register 2 in Decode stage
+  rd_e  : 0..3;    -- destination register in Execute stage
+  rd_m  : 0..3;    -- destination register in Memory stage (not used directly here)
+  rd_w  : 0..3;    -- destination register in Writeback stage (not used directly here)
+
+  -- Control/status bits from pipeline
+  resultsrc_e0 : boolean;  -- load instruction in EX stage (from datapath)
+  regwrite_m   : boolean;  -- RegWrite in MEM stage (for forwarding; abstracted)
+  regwrite_w   : boolean;  -- RegWrite in WB stage (for forwarding; abstracted)
+  pcsrc_e      : boolean;  -- branch/jump taken in EX stage (from pipe_risc_v)
+
+  -- Abstract program counter at Fetch stage (bounded)
+  pc_f : 0..15;
+
+  -- Abstract instruction and PC in Decode stage (bounded)
+  instr_d : 0..3;
+  pc_d    : 0..15;
+
+  -- Previous cycle values (for stability checks, bounded)
+  pc_f_prev   : 0..15;
+  instr_d_prev: 0..3;
+  pc_d_prev   : 0..15;
+
+
+DEFINE
+  -- ==========================================================================
+  -- Load-use stall condition (from hazard_unit.v):
+  --   lwStall = ((rs1_d == rd_e) || (rs2_d == rd_e)) && (resultsrc_e0 == 1)
+  -- ==========================================================================
+  lwStall := resultsrc_e0 &
+             ((rs1_d = rd_e) | (rs2_d = rd_e));
+
+  -- ==========================================================================
+  -- Hazard unit outputs (from hazard_unit.v):
+  --   stall_f = lwStall
+  --   stall_d = lwStall
+  --   flush_d = pcsrc_e
+  --   flush_e = lwStall || pcsrc_e
+  -- ==========================================================================
+  stall_f := lwStall;
+  stall_d := lwStall;
+  flush_d := pcsrc_e;
+  flush_e := lwStall | pcsrc_e;
+
+
+ASSIGN
+  -- ==========================================================================
+  -- Nondeterministic environment for register indices and control bits
+  -- ==========================================================================
+  init(rs1_d) := 0;
+  next(rs1_d) := {0,1,2,3};
+
+  init(rs2_d) := 0;
+  next(rs2_d) := {0,1,2,3};
+
+  init(rd_e) := 0;
+  next(rd_e) := {0,1,2,3};
+
+  init(rd_m) := 0;
+  next(rd_m) := {0,1,2,3};
+
+  init(rd_w) := 0;
+  next(rd_w) := {0,1,2,3};
+
+  init(resultsrc_e0) := FALSE;
+  next(resultsrc_e0) := {TRUE, FALSE};
+
+  init(regwrite_m) := FALSE;
+  next(regwrite_m) := {TRUE, FALSE};
+
+  init(regwrite_w) := FALSE;
+  next(regwrite_w) := {TRUE, FALSE};
+
+  init(pcsrc_e) := FALSE;
+  next(pcsrc_e) := {TRUE, FALSE};
+
+  -- ==========================================================================
+  -- PC behavior at Fetch (from pipe_risc_v.v):
+  --   en_pc = ~stall_f; PC must not advance when stall_f=1
+  -- We model:
+  --   if stall_f then pc_f_next = pc_f  (freeze)
+  --   else pc_f_next = pc_f + 4        (sequential fetch)
+  -- ==========================================================================
+  init(pc_f) := 0;
+  next(pc_f) :=
+    case
+      stall_f : pc_f;                     -- freeze PC on stall
+      pc_f >= 12 : 0;                     -- wrap when close to upper bound
+      TRUE       : pc_f + 4;              -- otherwise advance by 4
+    esac;
+
+  -- ==========================================================================
+  -- Abstract FD pipeline register behavior:
+  -- - If stall_d = 1, Decode stage holds its values (instr_d, pc_d).
+  -- - If flush_d = 1, Decode stage is cleared (NOP).
+  -- - Otherwise, Decode takes new values from Fetch (pc_f) and some
+  --   nondet instruction value (we only care about stability under stall).
+  -- ==========================================================================
+  init(instr_d) := 0;
+  next(instr_d) :=
+    case
+      stall_d      : instr_d;     -- hold under stall
+      flush_d      : 0;           -- flushed to NOP
+      instr_d = 3  : 0;           -- wrap at top of range 0..3
+      TRUE         : instr_d + 1; -- arbitrary new instruction
+    esac;
+
+  init(pc_d) := 0;
+  next(pc_d) :=
+    case
+      stall_d : pc_d;
+      flush_d : 0;
+      TRUE    : pc_f;   -- pc_f is 0..15
+    esac;
+
+  -- Track previous cycle values for pc_f, instr_d, pc_d
+  init(pc_f_prev)    := 0;
+  next(pc_f_prev)    := pc_f;
+
+  init(instr_d_prev) := 0;
+  next(instr_d_prev) := instr_d;
+
+  init(pc_d_prev)    := 0;
+  next(pc_d_prev)    := pc_d;
+
+-- ============================================================================
+-- CTL SPECIFICATIONS (derived from formal_properties.sv)
+-- ============================================================================
+
+-- Property 1: Stall relationship F<->D (same-cycle)
+-- Verilog intent: stall in Fetch implies stall in Decode.
+-- NuXMV:         stall_f and stall_d are always equal in the same cycle.
+CTLSPEC NAME p1_stall_propagation :=
+  AG ( stall_f <-> stall_d );
+
+-- Property 2: PC freeze during Fetch stall
+-- Verilog: stall_f |=> $stable(pc_f)
+-- NuXMV:   if stall_f is true, next(pc_f) = pc_f.
+CTLSPEC NAME p2_pc_freeze_during_stall :=
+  AG ( stall_f -> AX( pc_f = pc_f_prev ) );
+
+-- Property 3: FD register holds during Decode stall
+-- Verilog: stall_d |=> ($stable(instr_d) && $stable(pc_d))
+-- NuXMV:   if stall_d is true, instr_d and pc_d must not change.
+CTLSPEC NAME p3_fd_hold_during_stall :=
+  AG ( stall_d -> AX( instr_d = instr_d_prev & pc_d = pc_d_prev ) );
+
+-- Property 4: Flush correctness for branches/jumps
+-- Verilog: pcsrc_e |-> (flush_d && flush_e)
+-- NuXMV:   whenever branch/jump is taken, both flush_d and flush_e are 1.
+CTLSPEC NAME p4_branch_causes_flush :=
+  AG ( pcsrc_e -> (flush_d & flush_e) );
+
+-- Property 5: Load-use hazard detection
+-- Verilog:
+--   (resultsrc_e0 && ((rs1_d == rd_e) || (rs2_d == rd_e)) && (rd_e != 0))
+--     |-> (stall_f && stall_d && flush_e)
+-- NuXMV: same logical condition in CTL.
+CTLSPEC NAME p5_load_use_hazard_detection :=
+  AG ( (resultsrc_e0 &
+        ((rs1_d = rd_e) | (rs2_d = rd_e)) &
+        (rd_e != 0))
+       -> (stall_f & stall_d & flush_e) );
+
+-- Property 6: No stall+flush in Decode unless branch taken
+-- Verilog intent: !(stall_d && flush_d)
+-- NuXMV:         if Decode is stalled and no branch is taken, then flush_d = 0.
+CTLSPEC NAME p6_stall_flush_mutual_exclusion :=
+  AG ( (stall_d & !pcsrc_e) -> !flush_d );
+
+
+-- ============================================================================
+-- INVARIANTS (sanity checks that mirror the hazard_unit structure)
+-- ============================================================================
+
+-- Invariant 1: stall_f and stall_d are exactly the load-use stall
+INVARSPEC NAME inv1_stall_f_definition :=
+  stall_f <-> (resultsrc_e0 & ((rs1_d = rd_e) | (rs2_d = rd_e)));
+
+INVARSPEC NAME inv2_stall_d_definition :=
+  stall_d <-> (resultsrc_e0 & ((rs1_d = rd_e) | (rs2_d = rd_e)));
+
+-- Invariant 2: flush_d and flush_e match the hazard_unit equations
+INVARSPEC NAME inv3_flush_d_definition :=
+  flush_d <-> pcsrc_e;
+
+INVARSPEC NAME inv4_flush_e_definition :=
+  flush_e <-> ( (resultsrc_e0 & ((rs1_d = rd_e) | (rs2_d = rd_e))) | pcsrc_e );
+
+
+-- ============================================================================
+-- END OF MODEL
+-- ============================================================================

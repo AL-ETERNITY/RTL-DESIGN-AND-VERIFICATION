@@ -1,0 +1,22 @@
+.i 6
+.o 2
+.ilb ID_isBranch ID_isJump ID_hasDep EX_isBranch BranchTaken EX_isJump
+.ob STALL_ctrl FLUSH
+.p 8
+# C1: Branch in ID with dependency → Stall
+1010-0 10
+# C2: Jump in ID with dependency → Stall
+0110-0 10
+# C3: Branch in ID ready → No action
+1000-0 00
+# C4: Jump in ID ready → No action
+0100-0 00
+# C5: Branch in EX taken → Flush
+00-110 01
+# C6: Branch in EX not taken → No action
+00-100 00
+# C7: Jump in EX → Flush
+00-0-1 01
+# Default: No hazard
+000000 00
+.e

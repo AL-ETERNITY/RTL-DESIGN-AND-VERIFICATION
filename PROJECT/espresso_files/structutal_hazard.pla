@@ -1,0 +1,10 @@
+# Structural Hazard Stall Logic
+.i 6
+.o 1
+.ilb IF_MemReq MEM_MemReq ALU_Busy EX_UsesALU RF_WriteBusy ID_UsesRF
+.ob STALL_struct
+.p 3
+1 1 0 0 0 0 1
+0 0 1 1 0 0 1
+0 0 0 0 1 1 1
+.e

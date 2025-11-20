@@ -1,0 +1,15 @@
+# Data Hazard Stall Logic (no forwarding)
+.i 7
+.o 1
+.ilb EX_RW EX_MR MEM_RW D_EX T_EX D_MEM T_MEM
+.ob STALL_data
+.p 8
+1 0 0 1 0 0 0 1
+1 0 0 0 1 0 0 1
+0 1 0 1 0 0 0 1
+0 1 0 0 1 0 0 1
+0 0 1 0 0 1 0 1
+0 0 1 0 0 0 1 1
+1 1 0 1 0 0 0 1
+1 1 0 0 1 0 0 1
+.e
